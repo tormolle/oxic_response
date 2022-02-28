@@ -13,3 +13,5 @@ These must be stored within the R working directory in a separate folder named `
 Furthermore, the files `cmultRepl_inhouse.R`, `differential_expression_helpers.R`, `get_unique_taxa.R`, `ggbarplot_gen.R`,
 `multiplot.R`, `o2_concentration_helpers.R`, `pca2ggplot.R`, `process_tax_file.R`, `remove_empty_columns.R` and `svm_output_helpers.R` 
 should be stored in a subdirectory named `auxillary_functions`.
+
+Files used for sequence processing do not have to be part of the folder structure described above.
