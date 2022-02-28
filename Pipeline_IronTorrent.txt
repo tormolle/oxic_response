@@ -1,0 +1,175 @@
+﻿# Originally created by @torognes.
+# Retrieved from https://github.com/torognes/vsearch/wiki/VSEARCH-pipeline
+# 2019-02-04. Modified by @tormolle.
+# 2020-11-16. Modified by @SvenLeMoineBauer
+# This script is generic regarding the file names and needs no tweaking in this regard.
+# However, the primer forward sequence needs to be modified accordingly.
+# One should also look at the overal quality and length distribution at each step using fastQC.
+# Dependencies: perl, vsearch, python, cutadapt, blastn.
+# Files needed: map.pl, RemoveSeqs.py, a taxonomic database.
+# The script assumes that you start with a demultiplexed dataset.
+# This script does not remove singletons.
+# Use: In terminal, run "bash Pipeline_IronTorrent.txt"
+
+THREADS=7
+REF=silvamod128.fasta # Modify accordingly
+CUTADAPT=$(which cutadapt)
+BLASTN=$(which blastn)
+PERL=$(which perl)
+VSEARCH=$(which vsearch)
+PYTHON=$(which python)
+
+# Amount of reads in each demultiplexed fastq file (alphabetically).
+echo Amount of reads in each demultiplexed fastq file, alphabetically.
+for f in *.fastq; do
+    awk '{s++}END{print s/4}' $f
+done
+
+# Removal of forward primers. Modify the sequence if needed.
+echo Removing primers using Cutadapt
+for f in *.fastq; do
+    output=$(awk -F'.' '{print "1-" $1 ".noprimers.fastq"}' <<< $f)
+    $CUTADAPT -j 3 -g CAGCMGCCGCGGTAA --no-indels --discard-untrimmed -o $output $f
+done
+
+# Amount of reads in each output fastq file from cutadapt (alphabetically).
+echo Amount of reads in each fastq file without primers, alphabetically.
+for f in 1-*.fastq; do
+    awk '{s++}END{print s/4}' $f
+done
+
+# Trim the sequences at 220bp.
+for f in 1-*.fastq; do
+    output=$(awk -F'.' '{split($1, arr, /-/); print "2-" arr[2] ".trim220.fastq"}' <<< $f)
+    $VSEARCH --threads $THREADS \
+        --fastq_filter $f \
+        --fastq_maxns 0 \
+        --fastq_trunclen 220 \
+        --fastqout $output
+done
+
+# Amount of reads in each output fastq file from trimming (alphabetically).
+echo Amount of reads in each fastq file post-trimming, alphabetically.
+for f in 2-*.fastq; do
+    awk '{s++}END{print s/4}' $f
+done
+
+
+# Quality filtering at maxee = 2.
+for f in 2-*.fastq; do
+    output=$(awk -F'.' '{split($1, arr, /-/); print "3-" arr[2] ".qualfil.fasta"}' <<< $f)
+    $VSEARCH --threads $THREADS \
+        --fastq_filter $f \
+        --fastq_maxee 2 \
+        --fastaout $output \
+        --fasta_width 0
+done
+
+for f in 3-*.fasta; do
+    echo $(grep -c "^>" $f)
+done
+
+# Dereplicate at sample level and relabel with sample_n
+for f in 3-*.fasta; do
+    output=$(awk -F'.' '{split($1, arr, /-/); print "4-" arr[2] ".derep.fasta"}' <<< $f)
+    sample=$(awk -F'.' '{split($1, arr, /-/); print arr[2]}' <<< $f)
+    $VSEARCH --threads $THREADS \
+        --derep_fulllength $f \
+	--minuniquesize 1 \
+        --strand plus \
+        --sizeout \
+        --relabel $sample. \
+        --fasta_width 0 \
+        --output $output
+done 
+
+echo Amount of reads in dereplicated fasta files
+for f in 4-*.fasta; do
+    echo $(grep -c "^>" $f)
+done
+
+echo Pooling all fasta files
+cat 4-*.fasta > 5-all.fasta
+
+# Remove no more used files.
+rm 1-*.fastq 2-*.fastq 3-*.fasta 4-*.fasta
+
+echo Amount of reads in the pooled fasta file
+grep -c "^>" 5-all.fasta
+
+# Dereplicate across samples
+$VSEARCH --threads $THREADS \
+    --derep_fulllength 5-all.fasta \
+    --minuniquesize 1 \
+    --sizein \
+    --sizeout \
+    --fasta_width 0 \
+    --uc 6-all.derep.uc \
+    --output 6-all.derep.fasta
+
+# Amount of reads in the dereplicated pooled file
+grep -c "^>" 6-all.derep.fasta
+
+# denovo chimera detection
+$VSEARCH --threads $THREADS \
+    --uchime_denovo 6-all.derep.fasta \
+    --sizein \
+    --sizeout \
+    --fasta_width 0 \
+    --nonchimeras 7-all.denovo.fasta
+
+# Database chimera detection
+$VSEARCH --threads $THREADS \
+    --uchime_ref 7-all.denovo.fasta \
+    --db $REF \
+    --sizein \
+    --sizeout \
+    --fasta_width 0 \
+    --nonchimeras 8-all.ref.nonchimeras.fasta	
+
+# Removes chimeras from the all.fasta file, as well as the matching pooled seqs using the uc file. 
+echo Remove chimeras from all.fasta and match pooled sequences using external PERL script
+$PERL map.pl 5-all.fasta 6-all.derep.uc 8-all.ref.nonchimeras.fasta > 9-all.nonchimeras.fasta
+
+echo Amount of reads in total, without chimeras. 
+grep -c "^>" 9-all.nonchimeras.fasta
+
+echo Cluster OTUs at 97%
+$VSEARCH --threads $THREADS \
+    --cluster_size 9-all.nonchimeras.fasta \
+    --id 0.97 \
+    --strand plus \
+    --sizein \
+    --sizeout \
+    --fasta_width 0 \
+    --relabel OTU_ \
+    --centroids all.otus.fasta \
+    --otutabout all.otutab.txt
+
+# New denovo chimera detection.
+$VSEARCH --threads $THREADS \
+    --uchime_denovo all.otus.fasta \
+    --sizein \
+    --sizeout \
+    --fasta_width 0 \
+    --nonchimeras all.otus.denovo.fasta
+    
+# New Database chimera detection
+$VSEARCH --threads $THREADS \
+    --uchime_ref all.otus.denovo.fasta \
+    --db $REF \
+    --sizein \
+    --sizeout \
+    --fasta_width 0 \
+    --nonchimeras all.otus.nonchimeras.fasta
+
+echo Amount of otus in total, without chimeras. 
+grep -c "^>" all.otus.nonchimeras.fasta
+
+# Removes the chimera sequences from the OTU table. The output is "all.otutab.nonchimeras.csv"
+$PYTHON RemoveSeqs.py
+
+# Blasts the fasta file to get info on taxonomy.
+$BLASTN -query all.otus.nonchimeras.fasta -db silvamod128/silvamod128.fasta -max_target_seqs 100 -outfmt 5 -out all.otus.nonchimeras.xml
+
+# The file then needs to be uploaded to kraftlyng. Then run the "classify" command on it. The output will contain a taxonomy file.
